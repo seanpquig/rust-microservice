@@ -1,0 +1,12 @@
+[package]
+name = "microservice_rs"
+version = "0.1.0"
+authors = ["Sean Quigley <seanpquig@gmail.com>"]
+
+[dependencies]
+log = "0.4.1"
+env_logger = "0.5.5"
+serde_json = "1.0"
+url = "1.7.0"
+futures = "0.1.17"
+hyper = "0.11.22"
