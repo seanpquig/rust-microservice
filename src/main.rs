@@ -1,3 +1,7 @@
+#![feature(proc_macro)]
+#![feature(proc_macro_non_items)]
+extern crate maud;
+
 extern crate hyper;
 extern crate futures;
 extern crate url;
@@ -9,9 +13,25 @@ extern crate env_logger;
 #[macro_use]
 extern crate serde_json;
 
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate diesel;
+
+mod schema;
+mod models;
+
+use models::{Message, NewMessage};
+
+use diesel::prelude::*;
+use diesel::pg::PgConnection;
+
+use maud::html;
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::io;
+use std::env;
 
 use hyper::{Chunk, StatusCode};
 use hyper::Method::{Get, Post};
@@ -23,14 +43,92 @@ use futures::future::{Future, FutureResult};
 
 struct Microservice;
 
-struct NewMessage {
-    username: String,
-    message: String,
-}
-
 struct TimeRange {
     before: Option<i64>,
     after: Option<i64>,
+}
+
+const DEFAULT_DATABASE_URL: &'static str = "postgresql://postgres@localhost:5432";
+
+fn connect_to_db() -> Option<PgConnection> {
+    let database_url = env::var("DATABASE_URL").unwrap_or(String::from(DEFAULT_DATABASE_URL));
+    match PgConnection::establish(&database_url) {
+        Ok(connection) => Some(connection),
+        Err(error) => {
+            error!("Error connecting to database: {}", error.description());
+            None
+        }
+    }
+}
+
+fn write_to_db(
+    new_message: NewMessage,
+    db_connection: &PgConnection,
+) -> FutureResult<i64, hyper::Error> {
+    use schema::messages;
+    let timestamp = diesel::insert_into(messages::table)
+        .values(&new_message)
+        .returning(messages::timestamp)
+        .get_result(db_connection);
+
+    match timestamp {
+        Ok(timestamp) => futures::future::ok(timestamp),
+        Err(error) => {
+            error!("Error writing to database: {}", error.description());
+            futures::future::err(hyper::Error::from(
+                io::Error::new(io::ErrorKind::Other, "service error"),
+            ))
+        }
+    }
+}
+
+fn query_db(time_range: TimeRange, db_connection: &PgConnection) -> Option<Vec<Message>> {
+    use schema::messages;
+    let TimeRange { before, after } = time_range;
+    let query_result = match (before, after) {
+        (Some(before), Some(after)) => {
+            messages::table
+                .filter(messages::timestamp.lt(before as i64))
+                .filter(messages::timestamp.gt(after as i64))
+                .load::<Message>(db_connection)
+        }
+        (Some(before), _) => {
+            messages::table
+                .filter(messages::timestamp.lt(before as i64))
+                .load::<Message>(db_connection)
+        }
+        (_, Some(after)) => {
+            messages::table
+                .filter(messages::timestamp.gt(after as i64))
+                .load::<Message>(db_connection)
+        }
+        _ => messages::table.load::<Message>(db_connection),
+    };
+    match query_result {
+        Ok(result) => Some(result),
+        Err(error) => {
+            error!("Error querying DB: {}", error);
+            None
+        }
+    }
+}
+
+fn render_page(messages: Vec<Message>) -> String {
+    (html! {
+        head {
+            title "microservice"
+            style "body { font-family: monospace }"
+        }
+        body {
+            ul {
+                @for message in &messages {
+                    li {
+                        (message.username) " (" (message.timestamp) "): " (message.message)
+                    }
+                }
+            }
+        }
+    }).into_string()
 }
 
 fn parse_form(form_chunk: Chunk) -> FutureResult<NewMessage, hyper::Error> {
@@ -50,10 +148,6 @@ fn parse_form(form_chunk: Chunk) -> FutureResult<NewMessage, hyper::Error> {
             "Missing field 'message",
         )))
     }
-}
-
-fn write_to_db(entry: NewMessage) -> FutureResult<i64, hyper::Error> {
-    futures::future::ok(0)
 }
 
 fn make_post_response(
@@ -133,13 +227,23 @@ impl Service for Microservice {
 
     fn call(&self, request: Request) -> Self::Future {
         info!("Microservice received a request: {:?}", request);
+
+        let db_connection = match connect_to_db() {
+            Some(connection) => connection,
+            None => {
+                return Box::new(futures::future::ok(
+                    Response::new().with_status(StatusCode::InternalServerError),
+                ))
+            }
+        };
+
         match (request.method(), request.path()) {
             (&Post, "/") => {
                 let future = request
                     .body()
                     .concat2()
                     .and_then(parse_form)
-                    .and_then(write_to_db)
+                    .and_then(move |new_message| write_to_db(new_message, &db_connection))
                     .then(make_post_response);
                 Box::new(future)
             }
@@ -152,7 +256,7 @@ impl Service for Microservice {
                     }),
                 };
                 let response = match time_range {
-                    Ok(time_range) => make_get_response(query_db(time_range)),
+                    Ok(time_range) => make_get_response(query_db(time_range, &db_connection)),
                     Err(error) => make_error_response(&error),
                 };
                 Box::new(response)
