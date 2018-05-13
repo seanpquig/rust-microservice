@@ -1,0 +1,5 @@
+FROM postgres
+MAINTAINER <seanpquig@gmail.com>
+
+# Create the table on start-up
+ADD schemas/messages.sql /docker-entrypoint-initdb.d/
