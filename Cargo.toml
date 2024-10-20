@@ -11,6 +11,6 @@ serde_derive = "1.0"
 serde_json = "1.0"
 url = "1.7.0"
 futures = "0.1.17"
-hyper = "0.11.22"
+hyper = "0.14.12"
 diesel = { version = "1.0.0", features = ["postgres"] }
-maud = "0.17.2"
+maud = "0.26.0"
